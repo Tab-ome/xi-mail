@@ -1,0 +1,92 @@
+name: Deploy xi-mail
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  D1_DATABASE_ID: 6a46ad90-c0d2-409a-9e8a-a6d62cb98b5b
+  KV_NAMESPACE_ID: e192b948bccb4fb0aca107cdb79e711a
+  R2_BUCKET_NAME: xi-mail
+  DOMAIN: '["apione.cyou", "apithree.cyou", "apitwo.cyou", "claudestore.bond", "gptstore.bond", "gptteam.bond"]'
+  ADMIN: admin@apione.cyou
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            mail-view/pnpm-lock.yaml
+            mail-worker/pnpm-lock.yaml
+      - name: Build mail-view
+        working-directory: mail-view
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+      - name: Copy dist into mail-worker
+        run: |
+          rm -rf mail-worker/dist
+          cp -r mail-view/dist mail-worker/dist
+      - name: Install mail-worker deps
+        working-directory: mail-worker
+        run: pnpm install --frozen-lockfile
+      - name: Generate wrangler.toml
+        working-directory: mail-worker
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          cat > wrangler.toml <<EOF
+          name = "xi-mail"
+          main = "src/index.js"
+          compatibility_date = "2025-06-04"
+          keep_vars = true
+
+          [observability]
+          enabled = true
+
+          [[d1_databases]]
+          binding = "db"
+          database_name = "xi-mail"
+          database_id = "${D1_DATABASE_ID}"
+
+          [[kv_namespaces]]
+          binding = "kv"
+          id = "${KV_NAMESPACE_ID}"
+
+          [[r2_buckets]]
+          binding = "r2"
+          bucket_name = "${R2_BUCKET_NAME}"
+
+          [assets]
+          binding = "assets"
+          directory = "./dist"
+          not_found_handling = "single-page-application"
+          run_worker_first = true
+
+          [triggers]
+          crons = ["0 16 * * *"]
+
+          [vars]
+          orm_log = false
+          domain = ${DOMAIN}
+          admin = "${ADMIN}"
+          jwt_secret = "${JWT_SECRET}"
+          EOF
+          echo '--- generated ---'
+          head -25 wrangler.toml
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: mail-worker
+          command: deploy
